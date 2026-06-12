@@ -1,18 +1,37 @@
 """
-Generate captions for the COCO val 2014 set using
-`unsloth/Qwen3-VL-2B-Instruct-unsloth-bnb-4bit` and score them with CHAIR.
+Generate captions for the COCO val 2014 set with a Qwen3-VL model and
+score them with CHAIR.
+
+Supported models (any Qwen3-VL with `unsloth/` 4-bit checkpoint should work):
+    unsloth/Qwen3-VL-2B-Instruct-unsloth-bnb-4bit   (~1.2 GB 4-bit)
+    unsloth/Qwen3-VL-4B-Instruct-unsloth-bnb-4bit   (~2.4 GB 4-bit)
+    unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit   (~4.8 GB 4-bit)
+
+Approximate per-batch sizing on different VRAM tiers (max_image_side=896):
+
+    VRAM      2B     4B     8B
+    4  GB     12      -      -
+    8  GB     12     6      -
+    12 GB     12     8      4
+    16 GB     12     8      6
+    24 GB     12    12      8
+
+If a batch OOMs the script automatically halves the batch and retries, so
+passing a too-large --batch-size is safe: it will degrade to the largest
+batch that fits.
 
 Pipeline:
   1. Load the 4-bit model with unsloth FastModel.
-  2. For every COCO val2014 image, prompt "Describe this image." with
-     greedy decoding and append {"image_id": ..., "caption": ...} to
-     a JSONL file (incremental, resume-aware).
+  2. For every COCO val2014 image, prompt with greedy decoding and append
+     {"image_id": ..., "caption": ...} to a JSONL file (incremental,
+     resume-aware). Batches are split on OOM.
   3. After all captions are written, rebuild chair.pkl from
      coco_annotations/ and run chair.py to obtain CHAIRs / CHAIRi / Recall.
 
 Usage:
     python evaluate_vlm.py [--max-images 50]   # smoke test
-    python evaluate_vlm.py                    # full val2014
+    python evaluate_vlm.py --model unsloth/Qwen3-VL-8B-Instruct-unsloth-bnb-4bit
+    python evaluate_vlm.py --random-sample 5000
     python evaluate_vlm.py --evaluate-only    # skip inference, re-score existing JSONL
 """
 
@@ -117,7 +136,40 @@ def caption_batch(model, processor, prompt: str, pil_images, max_new_tokens: int
     return [t.strip() for t in texts]
 
 
+def caption_with_fallback(model, processor, prompt, pil_images, ids, max_new_tokens, depth=0):
+    """Caption `pil_images`; on OOM split the batch in half and recurse.
+
+    Returns a dict {image_id: caption}; failed singletons map to "".
+    `depth` is used only to indent the warning print so nested fallbacks
+    are visually distinguishable.
+    """
+    indent = "  " * depth
+    if not pil_images:
+        return {}
+    try:
+        captions = caption_batch(model, processor, prompt, pil_images, max_new_tokens)
+        return {imid: cap for imid, cap in zip(ids, captions)}
+    except torch.cuda.OutOfMemoryError as e:
+        torch.cuda.empty_cache()
+        if len(pil_images) == 1:
+            print(f"\n{indent}[warn] CUDA OOM on a single image ({ids[0]}): skipping. {e}")
+            return {ids[0]: ""}
+        mid = len(pil_images) // 2
+        print(f"\n{indent}[warn] CUDA OOM on batch of {len(pil_images)}; halving (depth={depth}).")
+        left = caption_with_fallback(model, processor, prompt,
+                                     pil_images[:mid], ids[:mid],
+                                     max_new_tokens, depth + 1)
+        right = caption_with_fallback(model, processor, prompt,
+                                      pil_images[mid:], ids[mid:],
+                                      max_new_tokens, depth + 1)
+        return {**left, **right}
+    except Exception as e:
+        print(f"\n{indent}[warn] failed on batch of {len(pil_images)}: {e}. Skipping batch.")
+        return {imid: "" for imid in ids}
+
+
 def run_inference(args, model, processor) -> int:
+    import random
     images_dir: Path = args.images_dir
     output_path: Path = args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,9 +184,15 @@ def run_inference(args, model, processor) -> int:
     if args.max_images and args.max_images > 0:
         all_images = all_images[: args.max_images]
 
+    if args.random_sample and args.random_sample > 0:
+        rng = random.Random(args.seed)
+        n = min(args.random_sample, len(all_images))
+        all_images = rng.sample(all_images, n)
+        print(f"[info] random sample: {n} images (seed={args.seed})")
+
     done_ids = load_existing_ids(output_path)
     todo = [p for p in all_images if parse_image_id(p) not in done_ids]
-    print(f"[info] {len(all_images)} images total, {len(done_ids)} already done, "
+    print(f"[info] {len(all_images)} images in scope, {len(done_ids)} already done, "
           f"{len(todo)} to process (batch_size={args.batch_size})")
 
     if not todo:
@@ -152,29 +210,20 @@ def run_inference(args, model, processor) -> int:
             batch_paths = todo[start:start + bs]
             batch_imgs = []
             batch_ids = []
-            try:
-                for img_path in batch_paths:
-                    imid = parse_image_id(img_path)
-                    pil = Image.open(img_path).convert("RGB")
-                    if max(pil.size) > max_side:
-                        pil.thumbnail((max_side, max_side), Image.LANCZOS)
-                    batch_imgs.append(pil)
-                    batch_ids.append(imid)
-                captions = caption_batch(
-                    model, processor, args.prompt, batch_imgs, args.max_new_tokens
-                )
-            except torch.cuda.OutOfMemoryError as e:
-                print(f"\n[warn] CUDA OOM on batch starting at {batch_paths[0].name}: {e}. Skipping batch.")
-                torch.cuda.empty_cache()
-                captions = [""] * len(batch_paths)
-                batch_ids = [parse_image_id(p) for p in batch_paths]
-            except Exception as e:
-                print(f"\n[warn] failed on batch starting at {batch_paths[0].name}: {e}. Skipping batch.")
-                captions = [""] * len(batch_paths)
-                batch_ids = [parse_image_id(p) for p in batch_paths]
+            for img_path in batch_paths:
+                imid = parse_image_id(img_path)
+                pil = Image.open(img_path).convert("RGB")
+                if max(pil.size) > max_side:
+                    pil.thumbnail((max_side, max_side), Image.LANCZOS)
+                batch_imgs.append(pil)
+                batch_ids.append(imid)
 
-            for imid, caption in zip(batch_ids, captions):
-                buffer.append(json.dumps({"image_id": imid, "caption": caption},
+            results = caption_with_fallback(
+                model, processor, args.prompt, batch_imgs, batch_ids, args.max_new_tokens
+            )
+
+            for imid in batch_ids:
+                buffer.append(json.dumps({"image_id": imid, "caption": results.get(imid, "")},
                                          ensure_ascii=False))
                 written += 1
             if written % flush_every < bs or len(buffer) >= flush_every:
@@ -239,16 +288,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
     p.add_argument("--max-images", type=int, default=0,
                    help="Process at most N images (0 = all). Useful for smoke tests.")
+    p.add_argument("--random-sample", type=int, default=0,
+                   help="Uniformly sample N images from the dataset (after --max-images).")
+    p.add_argument("--seed", type=int, default=42,
+                   help="Random seed for --random-sample.")
     p.add_argument("--max-new-tokens", type=int, default=128)
     p.add_argument("--batch-size", type=int, default=4,
-                   help="Number of images to caption per forward pass. Tune for your VRAM.")
+                   help="Max images per forward pass. Halved automatically on OOM.")
     p.add_argument("--max-image-side", type=int, default=896,
                    help="Down-scale images so that max(width,height) <= this value.")
+    p.add_argument("--max-memory", type=str, default=None,
+                   help="Forwarded to FastModel.from_pretrained as `max_memory` "
+                        "(e.g. '4GB' to cap GPU usage; default = use all available).")
     p.add_argument("--evaluate-only", action="store_true",
                    help="Skip inference; just run CHAIR on the existing JSONL.")
     p.add_argument("--rebuild-cache", action="store_true",
                    help="Delete chair.pkl and rebuild from coco_annotations/.")
-    p.add_argument("--max-seq-length", type=int, default=2048)
+    p.add_argument("--max-seq-length", type=int, default=4096,
+                   help="Context length for the KV cache; bump for larger models / longer prompts.")
     return p.parse_args()
 
 
@@ -257,11 +314,14 @@ def main() -> int:
 
     if not args.evaluate_only:
         print(f"[info] loading model {args.model} (4-bit) via unsloth FastModel")
-        model, tokenizer = FastModel.from_pretrained(
+        load_kwargs = dict(
             model_name=args.model,
             max_seq_length=args.max_seq_length,
             load_in_4bit=True,
         )
+        if args.max_memory:
+            load_kwargs["max_memory"] = args.max_memory
+        model, tokenizer = FastModel.from_pretrained(**load_kwargs)
         # Switch on unsloth's inference kernels
         model = FastModel.for_inference(model)
         processor = AutoProcessor.from_pretrained(args.model)
