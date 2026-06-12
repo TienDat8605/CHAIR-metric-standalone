@@ -15,7 +15,18 @@ import os
 import sys
 import nltk
 import json
-from pattern.en import singularize
+try:
+    from pattern.en import singularize as _pattern_singularize
+    def singularize(w):
+        return _pattern_singularize(w)
+except Exception:
+    import inflect
+    _inflect_engine = inflect.engine()
+    def singularize(w):
+        if not isinstance(w, str) or not w:
+            return w
+        s = _inflect_engine.singular_noun(w)
+        return s if s else w
 import argparse
 import tqdm
 import pickle

@@ -1,2 +1,17 @@
-coco_annotations
+# Datasets
+coco/
+coco_annotations/
+captions.jsonl
+captions*.jsonl
+chair.pkl
+chair_results.json
+outputs.json
 test*
+
+# Download / build artifacts
+.cache/
+.venv/
+__pycache__/
+unsloth_compiled_cache/
+*.pyc
+*.pyo

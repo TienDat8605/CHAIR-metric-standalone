@@ -1,0 +1,32 @@
+# Pinned cu130 + torch 2.10 wheel for Qwen3-VL via unsloth
+# (PyTorch's cu130 channel only provides torch 2.10.0+.)
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
+
+# Transformers: Qwen3-VL needs 4.57+ which is not yet released on PyPI,
+# so install from source.
+git+https://github.com/huggingface/transformers
+
+# Hugging Face stack
+accelerate>=1.0
+bitsandbytes>=0.46
+huggingface_hub>=0.25
+hf_transfer>=0.1
+safetensors>=0.4
+sentencepiece>=0.2
+qwen-vl-utils>=0.0.10
+pillow>=10.4
+
+# CHAIR dependencies (chair.py imports these)
+# NOTE: the original CLiPS `pattern` package is unmaintained and
+# supports only Python 2. We use the Python-3-native `inflect` package
+# and a small site-packages shim that exposes `pattern.en.singularize`
+# (see setup notes). The shim is created by evaluate_vlm's setup step.
+inflect>=7.0
+nltk>=3.8
+tqdm>=4.66
+
+# COCO download
+requests>=2.32
