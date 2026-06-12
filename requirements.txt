@@ -1,9 +1,45 @@
+# Verified versions (this is what was used to run the smoke test):
+#   torch        2.10.0+cu130
+#   torchvision  0.25.0+cu130
+#   torchaudio   2.10.0+cu130
+#   unsloth      2026.6.3
+#   unsloth_zoo  2026.6.3
+#   CUDA (torch) 13.0
+#   CUDA (nvcc)  12.8
+#   cuDNN        9.15.1
+#   nvidia driver 595.80
+#   Python       3.12
+#
 # Pinned cu130 + torch 2.10 wheel for Qwen3-VL via unsloth
 # (PyTorch's cu130 channel only provides torch 2.10.0+.)
 --extra-index-url https://download.pytorch.org/whl/cu130
 torch==2.10.0
 torchvision==0.25.0
 torchaudio==2.10.0
+
+# Unsloth + zoo (pinned to the build that was tested end-to-end)
+unsloth==2026.6.3
+unsloth_zoo==2026.6.3
+
+# CUDA 13.0 runtime libs (libnvJitLink.so.13, libnvrtc-builtins.so.13.0)
+# Required by bitsandbytes 4-bit kernels and triton kernel compilation
+# on cu130. Bundled inside the venv at nvidia/cu13/lib/; evaluate_vlm.py
+# adds that path to LD_LIBRARY_PATH at import time.
+nvidia-cuda-runtime==13.0.96
+nvidia-cuda-cupti==13.0.85
+nvidia-cuda-nvrtc==13.0.88
+nvidia-nvjitlink==13.0.88
+nvidia-cublas==13.1.0.3
+nvidia-cufft==12.0.0.61
+nvidia-curand==10.4.0.35
+nvidia-cusolver==12.0.4.66
+nvidia-cusparse==12.6.3.3
+nvidia-cusparselt-cu13==0.8.0
+nvidia-cudnn-cu13==9.15.1.9
+nvidia-nccl-cu13==2.28.9
+nvidia-nvshmem-cu13==3.4.5
+nvidia-nvtx==13.0.85
+nvidia-cufile==1.15.1.6
 
 # Transformers: Qwen3-VL needs 4.57+ which is not yet released on PyPI,
 # so install from source.
@@ -18,6 +54,8 @@ safetensors>=0.4
 sentencepiece>=0.2
 qwen-vl-utils>=0.0.10
 pillow>=10.4
+cuda-bindings==13.0.3
+cuda-pathfinder==1.5.5
 
 # CHAIR dependencies (chair.py imports these)
 # NOTE: the original CLiPS `pattern` package is unmaintained and
